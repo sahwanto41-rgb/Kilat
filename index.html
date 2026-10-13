@@ -199,6 +199,19 @@ window.QRCode = (function(){
 
   <section class="view" id="view-scan">
     <div class="card">
+      <h3 style="margin:0 0 8px">Scan Berdasarkan Tanggal</h3>
+      <div class="row" style="align-items:flex-end">
+        <div class="field" style="margin-bottom:0">
+          <label class="lbl">Tanggal presensi</label>
+          <input type="date" id="scanTanggal">
+        </div>
+        <div class="field" style="margin-bottom:0; flex:0 0 auto; min-width:0">
+          <button class="btn ghost" id="scanTodayBtn" type="button">Hari ini</button>
+        </div>
+      </div>
+      <p class="hint" id="scanDateHint">Hasil scan dicatat pada hari ini.</p>
+    </div>
+    <div class="card">
       <div id="reader"></div>
       <div class="actions">
         <button class="btn" id="startBtn">Mulai Scan</button>
@@ -207,26 +220,20 @@ window.QRCode = (function(){
       <p class="sub" id="cameraHint" style="margin-top:10px">Pastikan halaman ini dibuka lewat alamat <b>https://</b> dan izinkan akses Kamera saat diminta oleh browser.</p>
     </div>
     <div class="card">
-      <h3 style="margin:0 0 8px">Hadir hari ini</h3>
+      <h3 style="margin:0 0 8px" id="todayHeading">Hadir hari ini</h3>
       <table id="todayTable"><thead><tr><th>Waktu</th><th>Nama</th><th>Kelas</th></tr></thead><tbody></tbody></table>
-      <p class="empty" id="todayEmpty" style="display: block;">Belum ada yang absen hari ini.</p>
+      <p class="empty" id="todayEmpty" style="display: block;">Belum ada yang absen pada tanggal ini.</p>
     </div>
   </section>
 
   <section class="view active" id="view-siswa">
     <div class="card">
       <h3 style="margin:0 0 6px">Simpan ke Google Sheets</h3>
-      <p class="sub" style="margin-bottom:10px">Google Sheets menjadi data bersama semua guru: presensi dikirim otomatis, dan daftar siswa serta presensi dari perangkat lain diambil otomatis. Tempel alamat Web App dari Apps Script (berakhiran <b>/exec</b>) di setiap perangkat.</p>
-      <div class="row">
-        <input id="shUrl" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off">
-        <input id="shToken" placeholder="Kode rahasia (sama dengan di Apps Script)" autocomplete="off">
-      </div>
+      <p class="sub" style="margin-bottom:10px">Google Sheets menjadi data bersama semua guru: presensi dikirim otomatis, dan daftar siswa serta presensi dari perangkat lain bisa ditarik kapan saja.</p>
       <div class="actions" style="margin-top:4px">
-        <button class="btn" id="shSaveBtn">Simpan Pengaturan</button>
         <button class="btn ghost" id="shTestBtn">Tes Koneksi</button>
         <button class="btn ghost" id="shSyncAllBtn">Kirim Semua Data</button>
-        <button class="btn ghost" id="shPullBtn">Ambil Data dari Sheets</button>
-        <button class="btn ghost" id="shLinkBtn">Salin Tautan Setup</button>
+        <button class="btn ghost" id="shPullBtn">Tarik Data</button>
       </div>
       <p class="hint" id="shStatus">Belum tersambung.</p>
     </div>
@@ -848,8 +855,22 @@ window.QRCode = (function(){
 
   function pill(status){ return `<span class="pill ${status}">${STATUS_LABEL[status]||status}</span>`; }
 
+  // Tanggal yang dipilih untuk scan (default: hari ini)
+  function scanDateKey(){
+    const el = $('#scanTanggal');
+    return (el && /^\d{4}-\d{2}-\d{2}$/.test(el.value)) ? el.value : dateKey(new Date());
+  }
+  function fmtTanggalId(k){
+    const [y,m,d] = k.split('-').map(Number);
+    return new Date(y,m-1,d).toLocaleDateString('id-ID',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
+  }
   function renderToday(){
-    const key = dateKey(new Date());
+    const key = scanDateKey();
+    const isToday = key === dateKey(new Date());
+    $('#todayHeading').textContent = isToday ? 'Hadir hari ini' : 'Hadir pada '+fmtTanggalId(key);
+    const hint = $('#scanDateHint');
+    hint.textContent = isToday ? 'Hasil scan dicatat pada hari ini.' : '⚠ Hasil scan akan dicatat pada '+fmtTanggalId(key)+', bukan hari ini.';
+    hint.style.opacity = isToday ? '' : '1'; hint.style.color = isToday ? '' : 'var(--danger)'; hint.style.fontWeight = isToday ? '' : '700';
     const rows = presensi.filter(a=>a.dateKey===key && a.status==='H' && mp(a)===curMapel);
     $('#todayTable tbody').innerHTML = rows.map(r=>
       `<tr><td>${r.time}</td><td>${escapeHtml(r.nama)}</td><td><span class="pill">${escapeHtml(r.kelas||'-')}</span></td></tr>`
@@ -1272,7 +1293,7 @@ window.QRCode = (function(){
   let scanner = null;
   let scanLoading = false;
   async function onScanSuccess(text){
-    const key = dateKey(new Date());
+    const key = scanDateKey();
     const id = text.trim();
     let student = students.find(s=>s.id===id);
     if(!student && sheetsCfg().url){
@@ -1284,7 +1305,7 @@ window.QRCode = (function(){
     }
     if(!student){ flash('ID tidak dikenali: '+id, 'err'); return; }
     const existing = presensi.find(r=>r.id===id && r.dateKey===key && mp(r)===curMapel);
-    if(existing){ flash(student.nama+' sudah tercatat hari ini ('+STATUS_LABEL[existing.status]+').', 'warn'); return; }
+    if(existing){ flash(student.nama+' sudah tercatat pada tanggal ini ('+STATUS_LABEL[existing.status]+').', 'warn'); return; }
     upsert(id, key, 'H', '');
     flash(student.nama+' berhasil absen ✔', 'ok');
     renderToday(); renderHistory();
@@ -1937,6 +1958,12 @@ window.QRCode = (function(){
     $('#rkNamaGuru').placeholder=curMapel==='HARIAN'?'Nama guru kelas':'Nama guru '+curMapel;
     flash('Presensi untuk: '+(curMapel==='HARIAN'?'Harian (Guru Kelas)':curMapel),'ok');
   });
+  (function initScanDate(){
+    const el = $('#scanTanggal');
+    el.value = dateKey(new Date()); el.max = el.value;
+    el.addEventListener('change', ()=>{ if(!el.value) el.value = dateKey(new Date()); renderToday(); });
+    $('#scanTodayBtn').addEventListener('click', ()=>{ el.value = dateKey(new Date()); renderToday(); });
+  })();
   renderToday(); renderHistory(); renderStudents();
   initDb();
   (function initSheetsUi(){
@@ -1957,17 +1984,8 @@ window.QRCode = (function(){
       try{ history.replaceState(null, '', location.pathname+location.search); }catch(e){}
     }
     const cfg = sheetsCfg();
-    $('#shUrl').value = cfg.url||''; $('#shToken').value = cfg.token||'';
     if(cfg.url) setShStatus('Tersambung ke Google Sheets.');
     if(!storageOk) setShStatus('⚠ Browser ini tidak menyimpan data (mode penyamaran atau browser dalam aplikasi). Buka lewat Chrome/Safari biasa.');
-    $('#shSaveBtn').addEventListener('click', ()=>{
-      const url = $('#shUrl').value.trim();
-      if(url && !/^https:\/\/script\.google\.com\/.+\/exec$/.test(url)){ flash('Alamat harus dari Apps Script dan berakhiran /exec.', 'err'); return; }
-      try{ localStorage.setItem(SHEETS_CFG_KEY, JSON.stringify({url, token:$('#shToken').value.trim(), off:!url})); }catch(e){}
-      setShStatus(url ? 'Tersimpan. Menyambungkan dan mengirim data yang sudah ada…' : 'Belum tersambung.');
-      flash(url ? 'Pengaturan Google Sheets tersimpan.' : 'Sinkronisasi Google Sheets dimatikan.', 'ok');
-      if(url) sheetsSync(false);
-    });
     $('#shTestBtn').addEventListener('click', async ()=>{
       if(!sheetsCfg().url){ flash('Simpan alamat Web App terlebih dahulu.', 'warn'); return; }
       setShStatus('Menguji koneksi…');
@@ -1981,16 +1999,9 @@ window.QRCode = (function(){
       setShStatus('Mengirim semua data…');
       await sheetsQueueAll();
     });
-    $('#shLinkBtn').addEventListener('click', async ()=>{
-      const c = sheetsCfg();
-      if(!c.url){ flash('Simpan alamat Web App terlebih dahulu.', 'warn'); return; }
-      const link = location.origin+location.pathname+'#setup='+encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify({u:c.url, t:c.token||''})))));
-      try{ await navigator.clipboard.writeText(link); flash('Tautan setup tersalin. Kirim hanya ke guru yang berwenang.', 'ok'); }
-      catch(e){ window.prompt('Salin tautan setup ini (jangan dibagikan sembarangan):', link); }
-    });
     $('#shPullBtn').addEventListener('click', ()=>{
       if(!sheetsCfg().url){ flash('Simpan alamat Web App terlebih dahulu.', 'warn'); return; }
-      setShStatus('Mengambil data dari Google Sheets…');
+      setShStatus('Menarik data dari Google Sheets…');
       sheetsSync(true);
     });
     const pet = $('#petugas');
