@@ -417,6 +417,16 @@ window.QRCode = (function(){
       <p class="hint" id="scanDateHint">Hasil scan dicatat pada hari ini.</p>
     </div>
     <div class="card">
+      <div class="row" style="margin-bottom:10px">
+        <div class="field" style="margin-bottom:0">
+          <label class="lbl">Kamera</label>
+          <select id="camFacing"><option value="environment">Belakang</option><option value="user">Depan</option></select>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label class="lbl">Bunyi scan</label>
+          <select id="beepSel"><option value="1">Hidup</option><option value="0">Mati</option></select>
+        </div>
+      </div>
       <div id="reader"></div>
       <div class="actions">
         <button class="btn" id="startBtn">Mulai Scan</button>
@@ -1506,9 +1516,46 @@ window.QRCode = (function(){
   // Scanner
   let scanner = null;
   let scanLoading = false;
+  let lastScan = {id:'', t:0};
+
+  // ---- Bunyi penanda scan (Web Audio, tanpa file suara) ----
+  let audioCtx = null;
+  function unlockAudio(){
+    try{
+      if(!audioCtx){ const AC = window.AudioContext || window.webkitAudioContext; if(AC) audioCtx = new AC(); }
+      if(audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    }catch(e){}
+  }
+  function beepOn(){ const el = $('#beepSel'); return !el || el.value !== '0'; }
+  function playTones(list, vib){
+    if(!beepOn()) return;
+    try{ if(navigator.vibrate) navigator.vibrate(vib); }catch(e){}
+    try{
+      unlockAudio(); if(!audioCtx) return;
+      const now = audioCtx.currentTime;
+      list.forEach(n=>{
+        const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+        const t0 = now + n.t, t1 = t0 + n.d;
+        o.type = 'square'; o.frequency.value = n.f;
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(0.25, t0 + 0.01);
+        g.gain.exponentialRampToValueAtTime(0.0001, t1);
+        o.connect(g); g.connect(audioCtx.destination);
+        o.start(t0); o.stop(t1 + 0.02);
+      });
+    }catch(e){}
+  }
+  // Nada tinggi pendek = berhasil absen; dua nada rendah = gagal / sudah tercatat.
+  function beepOk(){ playTones([{f:1200, d:0.14, t:0}], 60); }
+  function beepWarn(){ playTones([{f:520, d:0.12, t:0}, {f:380, d:0.2, t:0.16}], [80,60,80]); }
+
   async function onScanSuccess(text){
     const key = scanDateKey();
-    const id = text.trim();
+    const id = String(text||'').trim();
+    // Kode yang sama masih di depan kamera: abaikan 2,5 detik agar tidak berbunyi/pesan berulang.
+    const nowMs = Date.now();
+    if(lastScan.id === id && nowMs - lastScan.t < 2500) return;
+    lastScan = {id, t:nowMs};
     let student = students.find(s=>s.id===id);
     if(!student && sheetsCfg().url){
       if(scanLoading) return;
@@ -1517,10 +1564,11 @@ window.QRCode = (function(){
       finally{ scanLoading = false; }
       student = students.find(s=>s.id===id);
     }
-    if(!student){ flash('ID tidak dikenali: '+id, 'err'); return; }
+    if(!student){ beepWarn(); flash('ID tidak dikenali: '+id, 'err'); return; }
     const existing = presensi.find(r=>r.id===id && r.dateKey===key && mp(r)===curMapel);
-    if(existing){ flash(student.nama+' sudah tercatat pada tanggal ini ('+STATUS_LABEL[existing.status]+').', 'warn'); return; }
+    if(existing){ beepWarn(); flash(student.nama+' sudah tercatat pada tanggal ini ('+STATUS_LABEL[existing.status]+').', 'warn'); return; }
     upsert(id, key, 'H', '');
+    beepOk();
     flash(student.nama+' berhasil absen ✔', 'ok');
     renderToday(); renderHistory();
   }
@@ -1545,47 +1593,71 @@ window.QRCode = (function(){
     return 'Tidak bisa mengakses kamera. Periksa izin kamera di browser lalu coba lagi. (' + name + ')';
   }
 
-  $('#startBtn').addEventListener('click', async ()=>{
+  let scanRunning = false;
+  function setScanUi(running){
+    scanRunning = running;
+    $('#startBtn').style.display = running ? 'none' : 'inline-block';
+    $('#stopBtn').style.display = running ? 'inline-block' : 'none';
+  }
+  // Pilih kamera sesuai permintaan (depan/belakang). Cari lewat label perangkat dulu;
+  // kalau tidak ketemu, pakai facingMode.
+  async function pickCamera(facing){
+    try{
+      const devices = await Html5Qrcode.getCameras();
+      if(devices && devices.length){
+        const re = facing === 'user' ? /front|depan|user|selfie|facetime/i : /back|belakang|rear|environment/i;
+        const hit = devices.find(d=> re.test(d.label||''));
+        if(hit) return hit.id;
+        if(facing === 'environment') return devices[devices.length-1].id;
+      }
+    }catch(e){ /* belum ada izin/info: pakai facingMode di bawah */ }
+    return {facingMode: facing};
+  }
+  async function startScan(){
     if(!window.Html5Qrcode){ flash('Pustaka kamera (Html5Qrcode) gagal dimuat. Periksa koneksi internet lalu muat ulang halaman ini.', 'err'); return; }
+    if(scanRunning) return;
+    unlockAudio(); // harus dipicu oleh sentuhan pengguna agar bunyi diizinkan browser
+    const facing = $('#camFacing').value;
     $('#startBtn').disabled = true;
+    const config = {fps:10, qrbox:200};
     try{
       scanner = new Html5Qrcode('reader');
-      const config = {fps:10, qrbox:200};
-
-      // Prefer picking an explicit back-camera device id: on some Android
-      // browsers / WebViews the {facingMode:'environment'} constraint alone
-      // fails even though a rear camera exists, so we try to resolve a real
-      // device id first and fall back to facingMode if that isn't possible.
-      let cameraTarget = {facingMode:'environment'};
       try{
-        const devices = await Html5Qrcode.getCameras();
-        if(devices && devices.length){
-          const back = devices.find(d=>/back|belakang|rear|environment/i.test(d.label||''));
-          cameraTarget = (back || devices[devices.length-1]).id;
-        }
-      }catch(e){ /* no permission/info yet: fall back to facingMode below */ }
-
-      await scanner.start(cameraTarget, config, onScanSuccess, ()=>{});
-      $('#startBtn').style.display='none'; $('#stopBtn').style.display='inline-block';
-    }catch(err){
-      console.error('Camera start failed:', err);
-      // If picking a specific device id failed, retry once with a plain
-      // environment-facing constraint before giving up.
-      try{
-        scanner = scanner || new Html5Qrcode('reader');
-        await scanner.start({facingMode:'environment'}, {fps:10, qrbox:200}, onScanSuccess, ()=>{});
-        $('#startBtn').style.display='none'; $('#stopBtn').style.display='inline-block';
-      }catch(err2){
-        console.error('Camera fallback failed:', err2);
-        flash(cameraErrorMessage(err2 || err), 'err');
+        await scanner.start(await pickCamera(facing), config, onScanSuccess, ()=>{});
+      }catch(err){
+        console.error('Camera start failed:', err);
+        // Coba sekali lagi dengan facingMode polos sebelum menyerah.
+        scanner = new Html5Qrcode('reader');
+        await scanner.start({facingMode:facing}, config, onScanSuccess, ()=>{});
       }
+      setScanUi(true);
+    }catch(err2){
+      console.error('Camera fallback failed:', err2);
+      flash(cameraErrorMessage(err2), 'err');
     }finally{
       $('#startBtn').disabled = false;
     }
+  }
+  async function stopScan(){
+    if(scanner){
+      try{ await scanner.stop(); }catch(e){}
+      try{ scanner.clear(); }catch(e){}
+    }
+    setScanUi(false);
+  }
+  $('#startBtn').addEventListener('click', startScan);
+  $('#stopBtn').addEventListener('click', stopScan);
+
+  // Ganti kamera depan/belakang: kalau sedang scan, otomatis dimulai ulang dengan kamera baru.
+  try{ const sv = localStorage.getItem('presensi_cam'); if(sv==='user' || sv==='environment') $('#camFacing').value = sv; }catch(e){}
+  try{ const sb = localStorage.getItem('presensi_beep'); if(sb==='0' || sb==='1') $('#beepSel').value = sb; }catch(e){}
+  $('#camFacing').addEventListener('change', async ()=>{
+    try{ localStorage.setItem('presensi_cam', $('#camFacing').value); }catch(e){}
+    if(scanRunning){ await stopScan(); await startScan(); }
   });
-  $('#stopBtn').addEventListener('click', ()=>{
-    if(scanner){ scanner.stop().then(()=>scanner.clear()); }
-    $('#startBtn').style.display='inline-block'; $('#stopBtn').style.display='none';
+  $('#beepSel').addEventListener('change', ()=>{
+    try{ localStorage.setItem('presensi_beep', $('#beepSel').value); }catch(e){}
+    if(beepOn()) beepOk(); // contoh bunyi saat dihidupkan
   });
 
   async function offerDownload(filename, data){
